@@ -54,7 +54,7 @@ func main() {
 	}
 
 	// speed が大きいほど待ち時間が短くなる（speed=10 で 120ms 相当）
-	delayMs := max(1200/ *speed, 1)
+	delayMs := max(1200 / *speed, 1)
 	delay := time.Duration(delayMs) * time.Millisecond
 
 	// --once: 現在時刻からフレームを決めて出力し終了する。
