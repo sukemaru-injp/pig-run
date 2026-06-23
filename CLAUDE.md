@@ -23,7 +23,16 @@ There are no tests in this repo. Requires Go 1.26+.
 
 ## Architecture
 
-Everything lives in `main.go`. Two distinct run modes branch off `main`:
+Everything lives in `main.go`. Three distinct run modes branch off `main`:
+
+- **`--farm` mode**: instead of a single track, draws a box (`farmRows`=8 rows tall × terminal
+  width) where `count` pigs wander freely. `runFarm` redraws the whole box each frame by moving
+  the cursor up `farmRows+2` lines (`\033[NA`). Pigs (`farmPig`: position + `dx/dy` direction)
+  bounce off walls in `stepFarmPigs` and occasionally change direction at random. `newFarmGrass`
+  sprinkles static 🌱 tufts; `renderFarm` draws pigs first, then grass only where no pig overlaps
+  (both glyphs are 2 cells wide and blank `x+1`, so overlapping spans would corrupt the line width).
+  `--once` ignores `--farm` (statusline must stay one line).
+
 
 - **Continuous mode** (default): an infinite loop prints one line per `step`, prefixing each
   frame with `\r` to overwrite the previous line, sleeping `delay` between frames. Hides the

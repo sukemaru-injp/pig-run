@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"math"
+	"math/rand"
 	"os"
 	"os/signal"
 	"strconv"
@@ -19,7 +20,13 @@ const (
 	track      = "." // 通常モードでブタが歩く地面
 	band       = "█" // 虹モードの色帯（1セル分の塗り）
 	huePeriod  = 28  // 虹が1周するまでの桁数。小さいほど色の変化が急になる
+	farmRows   = 8   // --farm の牧場の縦のマス数
+	grass      = "🌱" // 牧場にところどころ生える草
+	grassDens  = 14  // 草の密度（マス grassDens 個につき約1株）
 )
+
+// farmDirs はブタが進む方向の候補（-1, 0, +1）。
+var farmDirs = []int{-1, 0, 1}
 
 // trueColor はターミナルが24bitカラーに対応していれば真。
 // 非対応（Apple Terminal 等）では256色にフォールバックする。
@@ -33,6 +40,7 @@ func main() {
 	rainbow := flag.Bool("rainbow", false, "カラフルに表示する")
 	count := flag.Int("count", 3, "歩かせるブタの数")
 	width := flag.Int("width", 0, "トラックの幅（0でターミナル幅いっぱい）")
+	farm := flag.Bool("farm", false, "縦8マスの牧場の中をブタたちが自由に動き回る")
 	once := flag.Bool("once", false, "1フレームだけ出力して終了（statusline等から呼ぶ用）")
 	flag.Parse()
 
@@ -69,6 +77,12 @@ func main() {
 	defer cursorVisible(true)
 	cursorVisible(false)
 	handleSignals()
+
+	// --farm: 縦 farmRows・横 inner の牧場の中をブタたちが歩き回る
+	if *farm {
+		runFarm(inner, *count, *rainbow, delay)
+		return
+	}
 
 	for step := 0; ; step++ {
 		fmt.Print("\r" + renderLine(inner, *count, step, *rainbow))
@@ -111,6 +125,158 @@ func renderLine(inner, count, step int, rainbow bool) string {
 		return "|" + rainbowGround(inner, count, step) + "|"
 	}
 	return "|" + pigRow(inner, count, step, track) + "|"
+}
+
+// farmPig は牧場の中を歩き回る1頭のブタの状態。
+// x は左端セル位置（🐖 は2セル幅なので右隣 x+1 も占有する）、y は行。
+// dx/dy は現在向かっている方向（-1/0/+1）。
+type farmPig struct {
+	x, y   int
+	dx, dy int
+}
+
+// farmPos は牧場内の固定位置（草など、動かないもの）を表す。
+type farmPos struct {
+	x, y int
+}
+
+// runFarm は牧場アニメーションのメインループ。
+// 牧場は border + farmRows 行 + border の計 farmRows+2 行を占有するので、
+// 2フレーム目以降はカーソルをその行数だけ上に戻してから描き直す。
+func runFarm(inner, count int, rainbow bool, delay time.Duration) {
+	rows := farmRows
+	pigs := newFarmPigs(count, inner, rows)
+	grasses := newFarmGrass(inner, rows) // 草は最初に生やしたら動かさない
+	totalLines := rows + 2               // 上下の枠
+
+	for step := 0; ; step++ {
+		if step > 0 {
+			fmt.Printf("\033[%dA\r", totalLines) // 牧場の先頭行までカーソルを戻す
+		}
+		fmt.Println(renderFarm(pigs, grasses, inner, rows, step, rainbow))
+		stepFarmPigs(pigs, inner, rows)
+		time.Sleep(delay)
+	}
+}
+
+// newFarmGrass は牧場のあちこちに草をランダムに（重ならないように）生やす。
+// 🌱 も2セル幅なので、隣のセルと合わせて2マス分を確保する。
+func newFarmGrass(inner, rows int) []farmPos {
+	maxX := max(inner-2, 0)
+	occupied := make([][]bool, rows)
+	for r := range occupied {
+		occupied[r] = make([]bool, inner)
+	}
+	target := max(inner*rows/grassDens, 1)
+	grasses := make([]farmPos, 0, target)
+	for attempt := 0; attempt < target*5 && len(grasses) < target; attempt++ {
+		x := rand.Intn(maxX + 1)
+		y := rand.Intn(rows)
+		if occupied[y][x] || occupied[y][x+1] {
+			continue
+		}
+		occupied[y][x], occupied[y][x+1] = true, true
+		grasses = append(grasses, farmPos{x: x, y: y})
+	}
+	return grasses
+}
+
+// newFarmPigs は牧場内のランダムな位置・向きにブタを配置する。
+func newFarmPigs(count, inner, rows int) []farmPig {
+	maxX := max(inner-2, 0) // x+1 が範囲内に収まる右端
+	pigs := make([]farmPig, count)
+	for n := range pigs {
+		pigs[n] = farmPig{
+			x:  rand.Intn(maxX + 1),
+			y:  rand.Intn(rows),
+			dx: farmDirs[rand.Intn(len(farmDirs))],
+			dy: farmDirs[rand.Intn(len(farmDirs))],
+		}
+	}
+	return pigs
+}
+
+// stepFarmPigs は各ブタを1フレーム分動かす。
+// たまに向きをランダムに変え、壁にぶつかると跳ね返る。
+func stepFarmPigs(pigs []farmPig, inner, rows int) {
+	maxX := max(inner-2, 0)
+	maxY := rows - 1
+	for i := range pigs {
+		p := &pigs[i]
+		if rand.Intn(8) == 0 { // 約1/8の確率で気まぐれに方向転換
+			p.dx = farmDirs[rand.Intn(len(farmDirs))]
+			p.dy = farmDirs[rand.Intn(len(farmDirs))]
+		}
+		if nx := p.x + p.dx; nx < 0 || nx > maxX {
+			p.dx = -p.dx // 左右の壁で反射
+		}
+		if ny := p.y + p.dy; ny < 0 || ny > maxY {
+			p.dy = -p.dy // 上下の壁で反射
+		}
+		p.x = clamp(p.x+p.dx, 0, maxX)
+		p.y = clamp(p.y+p.dy, 0, maxY)
+	}
+}
+
+// renderFarm は牧場全体（枠＋中身）の複数行文字列を返す。
+// rainbow が真なら地面を虹のグラデーションにし、ブタはその上に立つ。
+func renderFarm(pigs []farmPig, grasses []farmPos, inner, rows, step int, rainbow bool) string {
+	grid := make([][]string, rows)
+	for r := range grid {
+		row := make([]string, inner)
+		for i := range row {
+			if rainbow {
+				row[i] = fgColor(hueAt(i, step)) + band + colorReset
+			} else {
+				row[i] = track
+			}
+		}
+		grid[r] = row
+	}
+
+	// ブタを置き、占有しているセル（本体 x と幅合わせの x+1）を記録する。
+	occupied := make([][]bool, rows)
+	for r := range occupied {
+		occupied[r] = make([]bool, inner)
+	}
+	for _, p := range pigs {
+		if rainbow {
+			grid[p.y][p.x] = bgColor(hueAt(p.x, step)) + pig + colorReset
+		} else {
+			grid[p.y][p.x] = pig
+		}
+		grid[p.y][p.x+1] = "" // 2セル目を消して幅を揃える（x+1 は必ず範囲内）
+		occupied[p.y][p.x], occupied[p.y][p.x+1] = true, true
+	}
+
+	// 草はブタと重ならない場所にだけ描く（重なると2セル幅が崩れて行幅が狂うため）。
+	for _, g := range grasses {
+		if occupied[g.y][g.x] || occupied[g.y][g.x+1] {
+			continue
+		}
+		grid[g.y][g.x] = grass
+		grid[g.y][g.x+1] = ""
+	}
+
+	border := "+" + strings.Repeat("-", inner) + "+"
+	var b strings.Builder
+	b.WriteString(border + "\n")
+	for _, row := range grid {
+		b.WriteString("|" + strings.Join(row, "") + "|\n")
+	}
+	b.WriteString(border)
+	return b.String()
+}
+
+// clamp は v を [lo, hi] の範囲に収める。
+func clamp(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 // rainbowGround は1セルごとに色相をずらした虹のグラデーション地面の上を、
